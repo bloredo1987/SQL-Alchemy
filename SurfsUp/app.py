@@ -6,11 +6,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, func
 from flask import Flask, jsonify
 import os
+import pandas as pd
 
 #################################################
 # Database Setup
 #################################################
-engine = create_engine("sqlite:///../Resources/hawaii.sqlite")
+engine = create_engine("sqlite:///Resources/hawaii.sqlite")
 
 # reflect an existing database into a new model
 Base = automap_base()
@@ -18,7 +19,6 @@ Base = automap_base()
 Base.prepare(autoload_with=engine)
 
 # Save references to each table
-Precipitation = Base.classes.precipitation
 Station = Base.classes.station
 Measurement = Base.classes.measurement
 
@@ -42,8 +42,9 @@ def welcome():
          f"/api/v1.0/precipitation<br/>"
          f"/api/v1.0/stations<br/>"
          f"/api/v1.0/tobs<br/>"
-         f"/api/v1.0/<start><br/>"
-         f"/api/v1.0/<start>/<end><br/>")
+         f"/api/v1.0/&lt;start&gt;<br/>"
+         f"/api/v1.0/&lt;start&gt;/&lt;end&gt;<br/>"
+     )
 
 @app.route("/api/v1.0/precipitation")
 def precipitation():
@@ -56,46 +57,66 @@ def precipitation():
 
 @app.route("/api/v1.0/stations")
 def stations():
-#     """Return a JSON list of stations from the dataset."""
-#   # Query all the unique station names
-    stations = session.query(Station.station).all()
+    """Return a JSON list of stations from the dataset."""
+    # Create a new session within the function to ensure thread safety
+    session = Session(engine)
+    
+    # Query all unique station names
+    results = session.query(Station.station).distinct().all()
     # Convert the query results to a list
-    station_list = [station[0] for station in stations]
-    return jsonify(station_list)
+    stations_data = [station[0] for station in results]
+
+    # Close the session to release resources
+    session.close()
+    
+    return jsonify(stations_data)
 
 @app.route("/api/v1.0/tobs")
 def tobs():
-#     """Return a JSON list of temperature observations for the previous year."""
-#     # Query the dates and temperature observations of the most-active station for the previous year of data
-     last_12_months_temps = session.query(Measurement.date, Measurement.tobs).filter(Measurement.station == 'USC00519281').filter(Measurement.date >= '2016-08-23').all()
-     # Convert the query results to a list of dictionaries
-     temperature_data = []
-     for date, tobs in last_12_months_temps:
-         temperature_data.append({"Date": date, "Temperature": tobs})
-     return jsonify(temperature_data)
+    """Query the dates and temperature observations of the most-active station for the previous year of data."""
+    # Calculate the date one year from the last date in the data set
+    most_recent_date = session.query(func.max(Measurement.date)).scalar()
+    most_recent_date = pd.to_datetime(most_recent_date).strftime('%Y-%m-%d')
+    one_year_ago = (pd.to_datetime(most_recent_date) - pd.DateOffset(years=1)).strftime('%Y-%m-%d')
+    
+    # Query temperature data for the most-active station for the last 12 months
+    most_active_station = session.query(Measurement.station)\
+                                 .group_by(Measurement.station)\
+                                 .order_by(func.count(Measurement.station).desc())\
+                                 .first()
+    most_active_station = most_active_station[0]
+    
+    temperature_data = session.query(Measurement.tobs)\
+                              .filter(Measurement.station == most_active_station,
+                                      Measurement.date >= one_year_ago,
+                                      Measurement.date <= most_recent_date)\
+                              .all()
+    
+    # Convert the query results to a list
+    temperatures = [temp[0] for temp in temperature_data]
+    
+    return jsonify(temperatures)
 
 @app.route("/api/v1.0/<start>")
 @app.route("/api/v1.0/<start>/<end>")
-def temperature_range(start=None, end=None):
-#     """Return a JSON list of the minimum temperature, the average temperature, and the maximum temperature for a specified start or start-end range."""
-#     # Define the query based on the provided start and end dates
-     if end:
-         temperature_data = session.query(func.min(Measurement.tobs).label("TMIN"),
-                                          func.avg(Measurement.tobs).label("TAVG"),
-                                          func.max(Measurement.tobs).label("TMAX")).filter(Measurement.date >= start).filter(Measurement.date <= end).all()
-     else:
-         temperature_data = session.query(func.min(Measurement.tobs).label("TMIN"),
-                                          func.avg(Measurement.tobs).label("TAVG"),
-                                          func.max(Measurement.tobs).label("TMAX")).filter(Measurement.date >= start).all()
-     # Create a dictionary to hold the results
-     temperature_stats = {
-         "Start Date": start,
-         "End Date": end,
-         "TMIN": temperature_data[0][0],
-         "TAVG": temperature_data[0][1],
-         "TMAX": temperature_data[0][2]
-     }
-     return jsonify(temperature_stats)
+def temperature_summary(start, end=None):
+    """Query the temperature summary (TMIN, TAVG, TMAX) for a specified start or start-end range."""
+    # Perform the query based on the provided start and end dates
+    if end:
+        results = session.query(func.min(Measurement.tobs), func.avg(Measurement.tobs), func.max(Measurement.tobs)).filter(Measurement.date >= start, Measurement.date <= end).all()
+    else:
+        results = session.query(func.min(Measurement.tobs), func.avg(Measurement.tobs), func.max(Measurement.tobs)).filter(Measurement.date >= start).all()
+    
+    # Create a summary dictionary
+    summary_data = {
+        "start_date": start,
+        "end_date": end,
+        "min_temperature": results[0][0],
+        "avg_temperature": results[0][1],
+        "max_temperature": results[0][2]
+    }
+    
+    return jsonify(summary_data)
 
 if __name__ == "__main__":
     app.run(debug=True)
